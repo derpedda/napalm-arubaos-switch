@@ -1,10 +1,14 @@
 """ArubaOS-Switch Napalm driver."""
 import base64
 from itertools import zip_longest
+from json import JSONDecodeError
 from time import sleep
 
-import requests
+from requests.models import Response
+from requests_futures.sessions import FuturesSession
+from concurrent.futures import as_completed
 import logging
+import socket
 from netaddr import IPNetwork
 
 from napalm.base.helpers import textfsm_extractor
@@ -37,13 +41,15 @@ log = logging.getLogger(__name__)
 class ArubaOSS(NetworkDriver):
     """Class for connecting to aruba-os devices using the rest-api."""
 
-    def __init__(self, hostname,
-                 username='',
-                 password='',
-                 timeout=10,
-                 optional_args=None):
+    def __init__(
+            self,
+            hostname,
+            username='',
+            password='',
+            timeout=10,
+            optional_args={}
+    ):
         """Instantiate the module."""
-        self._headers = {'Content-Type': 'application/json'}
         self.hostname = hostname
         self.username = username
         self.password = password
@@ -52,48 +58,94 @@ class ArubaOSS(NetworkDriver):
         # ----------------------------------------------------------------------------------------
         # optional arguments
         # ----------------------------------------------------------------------------------------
-        if optional_args is None:
-            optional_args = {}
 
         self.api = optional_args.get("api", "v6")
-        ssl = optional_args.get("ssl", True)
-        self.keepalive = optional_args.get("keepalive", None)
-        self.ssl_verify = optional_args.get("ssl_verify", False)
-        if ssl:
-            self.proto = 'https'
-        else:
-            self.proto = 'http'
+        self.proto = 'https' if optional_args.get("ssl", True) else 'http'
 
-        # URL encoding
+        self._api_url = '{}://{}/rest/{}/'.format(
+            self.proto,
+            self.hostname,
+            self.api
+        )
 
-        self._api_url = '{}://{}/rest/{}/'.format(self.proto,
-                                                  self.hostname,
-                                                  self.api)
+        self._apisession = FuturesSession()
+        self._apisession.verify = optional_args.get("ssl_verify", True)
+        self._apisession.headers = {'Content-Type': 'application/json'}
+        # bug #4 - random delay while re-using TCP connection - workaround:
+        self._apisession.keep_alive = optional_args.get("keepalive", True)
+        self._login_url = self._api_url + "login-sessions"
+        self._cli_url = self._api_url + 'cli'
+        self._system_status_url = self._api_url + 'system/status'
+        self._ipaddresses_url = self._api_url + 'ipaddresses'
+        self._ping_url = self._api_url + 'ping'
+
+        self.cli_output = {}
+
+    def _get(self, *args, **kwargs) -> Response:
+        """
+        Call a single command (Helper-Function).
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+        ret = self._apisession.get(*args, **kwargs)
+
+        return ret.result()
+
+    def _post(self, *args, **kwargs) -> Response:
+        """
+        Call a single command (Helper-Function).
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+        ret = self._apisession.post(*args, **kwargs)
+
+        return ret.result()
+
+    def _put(self, *args, **kwargs) -> Response:
+        """
+        Call a single command (Helper-Function).
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+        ret = self._apisession.put(*args, **kwargs)
+
+        return ret.result()
+
+    def _delete(self, *args, **kwargs) -> Response:
+        """
+        Call a single command (Helper-Function).
+
+        :param args:
+        :param kwargs:
+        :return:
+        """
+        ret = self._apisession.delete(*args, **kwargs)
+
+        return ret.result()
 
     def open(self):
         """Open connection to the network device."""
-        self._login_url = self._api_url + "login-sessions"
-
         params = {'userName': self.username, 'password': self.password}
-        self._apisession = requests.Session()
 
-        if not self.ssl_verify:
-            self._apisession.verify = False
+        rest_login = self._post(
+            self._login_url,
+            json=params,
+            timeout=self.timeout
+        )
 
-        self._apisession.headers = self._headers
-        # bug #4 - random delay while re-using TCP connection - workaroud:
-        if self.keepalive is None:
-            self._apisession.keep_alive = False
-
-        rest_login = self._apisession.post(self._login_url, json=params,
-                                           timeout=self.timeout)
-
-        if rest_login.status_code == 201:
-            session = rest_login.json()
-            self._headers['cookie'] = session['cookie']
-            return True
-        else:
+        if not rest_login.status_code == 201:
             raise ConnectAuthError("Login failed")
+
+        session = rest_login.json()
+        self._apisession.headers['cookie'] = session['cookie']
+
+        return True
 
     def is_alive(self):
         """Check if device connection is alive."""
@@ -103,7 +155,7 @@ class ArubaOSS(NetworkDriver):
             None - There's an error
         """
         url = self._api_url + 'system'
-        endpoint = self._apisession.get(url)
+        endpoint = self._get(url)
         if endpoint.status_code == 200:
             "Session cookie is still valid"
             return {"is_alive": True}
@@ -119,10 +171,10 @@ class ArubaOSS(NetworkDriver):
         status = 'CRS_IN_PROGRESS'
         elapsed = 0
         while status == 'CRS_IN_PROGRESS' and elapsed < self.timeout:
-            call = self._apisession.get(url)
-            if 300 > call.status_code >= 200:
+            call = self._get(url)
+            if call.status_code in range(200, 300):
                 status = call.json()
-                return call
+                return status
             elapsed += 1
             sleep(1)
         if elapsed == (int(self.timeout) - 1) and status == 'CRS_IN_PROGRESS':
@@ -132,11 +184,13 @@ class ArubaOSS(NetworkDriver):
     def _str_to_b64(spayload):
         """Convert from str to b64 for aoss API."""
         payload_b64 = base64.b64encode(spayload.encode())
+
         return payload_b64.decode('utf-8')
 
     @staticmethod
     def _mac_reformat(mac):
         t = iter(mac.replace("-", ""))
+
         return ':'.join(a+b for a, b in zip_longest(t, t, fillvalue=""))
 
     def load_replace_candidate(self, filename=None, config=None):
@@ -156,7 +210,7 @@ class ArubaOSS(NetworkDriver):
 
         if config is not None:
             payload['config_base64_encoded'] = ArubaOSS._str_to_b64(config)
-            load = self._apisession.post(url, json=payload)
+            load = self._post(url, json=payload)
             if load.status_code != 200:
                 raise ReplaceConfigException("Load configuration failed")
 
@@ -184,16 +238,67 @@ class ArubaOSS(NetworkDriver):
 
     def cli(self, commands):
         """Run CLI commands through the REST API."""
-        output = {}
-        if isinstance(commands, list):
-            for cmd in commands:
-                output[cmd] = str(self._run_cmd(cmd))
-            return output
-        elif isinstance(commands, str):
-            cmd_list = commands.splitlines()
-            return self.cli(cmd_list)
+        self.cli_output = {}
+        if not isinstance(commands, list):
+            self.cli_output['error'] = 'Provide a list of commands'
+            return self.cli_output
 
-    def get_arp_table(self):
+        async_calls = (
+            self._apisession.post(
+                url=self._cli_url,
+                json={'cmd': command},
+                hooks={
+                    'response': self._callback(
+                        output=self.cli_output,
+                        command=command
+                    )
+                }
+            ) for command in commands
+        )
+
+        [call.result() for call in as_completed(async_calls)]
+
+        return self.cli_output
+
+    def _callback(self, *args, **kwargs):
+        """
+        Return Callback for async calls.
+
+        ArubaOSS.cli uses it.
+
+        :param args:
+        :param kwargs:
+        :return: callback function
+        """
+        def callback(call, *cargs, **ckwargs):
+            self.cli_output = kwargs.get('output')
+            passed_cmd = kwargs.get('command')
+            try:
+                json_ret = call.json()
+            except JSONDecodeError:
+                json_ret = {}
+
+            cmd = json_ret.get('cmd')
+            result_base64 = json_ret.get('result_base64_encoded', '')
+
+            if not cmd == passed_cmd:
+                self.cli_output[passed_cmd] = 'cmd not found in output'
+                return
+
+            if not result_base64:
+                self.cli_output[passed_cmd] = 'no result found in output'
+                return
+
+            result = base64.b64decode(result_base64).decode('utf-8')
+            self.cli_output[passed_cmd] = result
+
+        return callback
+
+    def _run_cmd(self, cmd):
+        ret = self.cli([cmd])
+        return ret[cmd]
+
+    def get_arp_table(self, *args, **kwargs):
         """Get device's ARP table."""
         raw_arp = self._run_cmd("show arp")
         arp_table = textfsm_extractor(self, "show_arp", raw_arp)
@@ -201,6 +306,7 @@ class ArubaOSS(NetworkDriver):
             arp['interface'] = arp.pop('port')
             arp['mac'] = self._mac_reformat(arp['mac'])
             arp['age'] = 'N/A'
+
         return arp_table
 
     def get_environment(self):
@@ -216,35 +322,44 @@ class ArubaOSS(NetworkDriver):
          - show system information (CPU/MEM)
         """
         output = {
-                  "fans": {},
-                  "temperature": {},
-                  "power": {},
-                  "cpu": {},
-                  "memory": {}
-                  }
+            "fans": {},
+            "temperature": {},
+            "power": {},
+            "cpu": {},
+            "memory": {}
+        }
+
         return output
 
-    def get_config(self, retrieve="all"):
+    def get_config(self, retrieve='all', full=False):
         """Get configuration stored on the device."""
         out = {'startup': '', 'candidate': '', 'running': ''}
 
-        if (retrieve == 'all' or retrieve == 'startup'):
-            out['startup'] = str(self._run_cmd("display saved-configuration"))
-        if (retrieve == 'all' or retrieve == 'running'):
-            out['running'] = str(self._run_cmd("show running-config"))
-        if (retrieve == 'all' or retrieve == 'candidate'):
-            out['candidate'] = str(self._run_cmd(
-                                "show config REST_Payload_Backup"))
+        cmd_mapping = {
+            'display saved-configuration': 'startup',
+            'show config REST_Payload_Backup': 'candidate',
+            'show running-config': 'running'
+        }
+        cmd_mapping = {
+            key: value for key, value in cmd_mapping.items() if retrieve == value
+        } if not retrieve == 'all' else cmd_mapping
+
+        outputs = self.cli([cmd for cmd, config in cmd_mapping.items()])
+
+        for okey, ovalue in outputs.items():
+            out[cmd_mapping[okey]] = ovalue
+
         return out
 
     def get_facts(self):
         """Get general device information."""
-        out = {'vendor': 'HPE Aruba'}
-        out['interface_list'] = []
+        out = {
+            'vendor': 'HPE Aruba',
+            'interface_list': []
+        }
 
-        url = self._api_url + 'system/status'
-        call = self._apisession.get(url)
-        if 300 > call.status_code >= 200:
+        call = self._get(self._system_status_url)
+        if call.ok:
             rest_out = call.json()
             out['hostname'] = rest_out['name']
             out['os_version'] = rest_out['firmware_version']
@@ -253,16 +368,16 @@ class ArubaOSS(NetworkDriver):
 
             # get domain name to generate the FQDN
             url = self._api_url + 'dns'
-            call = self._apisession.get(url)
-            if 300 > call.status_code >= 200:
+            call = self._get(url)
+            if call.ok:
                 rest_out = call.json()
                 out['fqdn'] = out['hostname'] + "." + \
                     rest_out['dns_domain_names'][0]
 
         # Get interface list
         url = self._api_url + 'system/status/switch'
-        call = self._apisession.get(url)
-        if 300 > call.status_code >= 200:
+        call = self._get(url)
+        if call.ok:
             rest_out = call.json()
             for blade in rest_out['blades']:
                 for ports in blade['data_ports']:
@@ -284,27 +399,29 @@ class ArubaOSS(NetworkDriver):
                 "is_oobm": False
                 }
         # trigger configuration comparison
-        diff = self._apisession.post(url, json=data)
-        if 300 > diff.status_code >= 200:
-            diff_output = self._apisession.get(check_url)
-            if diff_output.status_code == 200:
-                if not diff_output.json()['diff_add_list'] and \
-                        not diff_output.json()['diff_remove_list']:
-                    # return empty string to signal the candidate
-                    # and running configs are the same
-                    return ""
-                else:
-                    return diff_output.json()
-            else:
-                raise CommandErrorException("diff generation failed,\
-                    raise status")
-        else:
+        diff = self._post(url, json=data)
+
+        if not diff.ok:
             raise CommandErrorException("diff generation failed, raise status")
+
+        diff_output = self._get(check_url)
+
+        if not diff_output.status_code == 200:
+            raise CommandErrorException("diff generation failed, raise status")
+
+        if not diff_output.json()['diff_add_list'] and \
+                not diff_output.json()['diff_remove_list']:
+            # return empty string to signal the candidate
+            # and running configs are the same
+
+            return ''
+        else:
+            return diff_output.json()
 
     def commit_config(self, message=None, confirm=0):
         """Backups and commit the configuration, and handles commit confirm."""
         self._backup_config()
-        log.debug("Confirm rollback time is {}".format(str(confirm)))
+        log.debug('Confirm rollback time is {}'.format(str(confirm)))
         if confirm > 0:
             candidate = self.get_config(retrieve='candidate')['candidate'][:-2]
             candidate_confirm = candidate + 'job ROLLBACK delay {} \
@@ -320,41 +437,40 @@ class ArubaOSS(NetworkDriver):
                 "file_name": config,
                 "is_oobm": False
                 }
-        cmd_post = self._apisession.post(url, json=data)
+        cmd_post = self._post(url, json=data)
 
         if not cmd_post.json()['failure_reason']:
             check_url = url + '/status'
-            return self._transaction_status(check_url).json()
+
+            return self._transaction_status(check_url)
 
     def get_mac_address_table(self):
         """Get the mac-address table of the device."""
         url = self._api_url + 'mac-table'
-        resp = self._apisession.get(url)
+        resp = self._get(url)
         if resp.status_code == 200:
             table = []
             for entry in resp.json().get('mac_table_entry_element'):
-                item = {}
-                item['mac'] = self._mac_reformat(entry['mac_address'])
-                item['interface'] = entry['port_id']
-                item['vlan'] = entry['vlan_id']
-                item['active'] = True
-                """ Not supported:
-                item['static'] = False
-                item['moves'] = 0
-                item['last_move'] = 0.0
-                """
+                item = {
+                    'mac': self._mac_reformat(entry['mac_address']),
+                    'interface': entry['port_id'],
+                    'vlan': entry['vlan_id'],
+                    'active': True,
+                    # 'static': False,  # not supported
+                    # 'moves': 0,  # not supported
+                    # 'last_move': 0.0  # not supported
+                }
                 table.append(item)
+
             return table
 
     def get_interfaces_ip(self):
         """Get IP interface IP addresses."""
-        url = self._api_url + 'ipaddresses'
-        url = self._api_url + 'ipaddresses'
         "Looks like there's a bug n ArubaOS and is not returning IPv6"
 
-        resp = self._apisession.get(url)
+        output = {}
+        resp = self._get(self._ipaddresses_url)
         if resp.status_code == 200:
-            output = {}
             for address in resp.json().get('ip_address_subnet_element'):
                 iface_name = "VLAN" + str(address['vlan_id'])
                 if iface_name not in output.keys():
@@ -367,14 +483,16 @@ class ArubaOSS(NetworkDriver):
                     output[iface_name][version] = {}
                 output[iface_name][version][str(ip.ip)] = {
                         'prefix_length': ip.prefixlen}
-            return output
+
+        return output
 
     def get_lldp_neighbors(self):
         """Get a list of LLDP neighbors."""
         url = self._api_url + '/lldp/remote-device'
-        resp = self._apisession.get(url)
+        resp = self._get(url)
         log.debug("API returned {}".format(resp.status_code))
-        if 300 > resp.status_code >= 200:
+
+        if resp.ok:
             neighbor_table = {}
             for neighbor in resp.json()['lldp_remote_device_element']:
                 port = neighbor['local_port']
@@ -385,14 +503,16 @@ class ArubaOSS(NetworkDriver):
                         'port': neighbor.get('port_id')
                         }
                 neighbor_table[port].append(remote_device)
+
             return neighbor_table
 
-    def get_lldp_neighbors_detail(self):
+    def get_lldp_neighbors_detail(self, *args, **kwargs):
         """Get LLDP neighbor information."""
         url = self._api_url + '/lldp/remote-device'
-        resp = self._apisession.get(url)
+        resp = self._get(url)
         log.debug("API returned {}".format(resp.status_code))
-        if 300 > resp.status_code >= 200:
+
+        if resp.ok:
             neighbor_table = {}
             for neighbor in resp.json()['lldp_remote_device_element']:
                 port = neighbor['local_port']
@@ -414,6 +534,7 @@ class ArubaOSS(NetworkDriver):
                             'capabilities_enabled').items() if v is True]
                     }
                 neighbor_table[port].append(remote_device)
+
             return neighbor_table
 
     def get_ntp_peers(self):
@@ -428,7 +549,7 @@ class ArubaOSS(NetworkDriver):
         """Get NTP servers."""
         " TO-DO: add IPv6 support, currently getting 404 from the API"
         url = self._api_url + 'config/ntp/server/ip4addr'
-        resp = self._apisession.get(url)
+        resp = self._get(url)
         if resp.status_code == 200:
             output = {}
             for server in resp.json().get('ntpServerIp4addr_element'):
@@ -443,29 +564,28 @@ class ArubaOSS(NetworkDriver):
         for association in associations.keys():
             url = self._api_url + \
                 'monitoring/ntp/associations/detail/' + association
-            resp = self._apisession.get(url)
+            resp = self._get(url)
             if resp.status_code == 200:
-                ntp_entry = {}
-                ntp_entry['remote'] = resp.json()['IP Address']
-                ntp_entry['referenceid'] = resp.json()['Reference ID']
+                ntp_entry = {
+                    'remote': resp.json()['IP Address'],
+                    'referenceid': resp.json()['Reference ID'],
+                    'stratum': int(resp.json()['Stratum']),
+                    'type': resp.json()['Peer Mode'],
+                    'when': resp.json()['Origin Time'],
+                    'hostpoll': int(resp.json()['Peer Poll Intvl']),
+                    'reachability': int(resp.json()['Reach']),
+                    'delay': float(resp.json()['Root Delay'].split(' ')[0]),
+                    'offset': float(resp.json()['Offset'].split(' ')[0]),
+                    'jitter': float(resp.json()['Root Dispersion'].split(' ')[0])
+                }
 
                 if resp.json()['Status'].find("Master") == -1:
                     ntp_entry['synchronized'] = False
                 else:
                     ntp_entry['synchronized'] = True
 
-                ntp_entry['stratum'] = int(resp.json()['Stratum'])
-                ntp_entry['type'] = resp.json()['Peer Mode']
-                ntp_entry['when'] = resp.json()['Origin Time']
-                ntp_entry['hostpoll'] = int(resp.json()['Peer Poll Intvl'])
-                ntp_entry['reachability'] = int(resp.json()['Reach'])
-                ntp_entry['delay'] = \
-                    float(resp.json()['Root Delay'].split(' ')[0])
-                ntp_entry['offset'] = \
-                    float(resp.json()['Offset'].split(' ')[0])
-                ntp_entry['jitter'] = \
-                    float(resp.json()['Root Dispersion'].split(' ')[0])
                 out.append(ntp_entry)
+
         return out
 
     def get_optics(self):
@@ -476,73 +596,82 @@ class ArubaOSS(NetworkDriver):
         return super().get_optics()
 
     def get_route_to(self, destination='', protocol=''):
-        """Get active route for a given destination."""
-        v4_table = []
-        v6_table = []
-        if destination != '':
+        """
+        Get route to destination.
+
+        :param destination:
+        :param protocol:
+        :return:
+        """
+        if destination:
             ip_address = IPNetwork(destination)
-            if ip_address.version == 4:
-                raw_v4_table = self._run_cmd(
-                    "show ip route {} {}".format(protocol, ip_address.ip))
-                v4_table = textfsm_extractor(
-                    self, "show_ip_route", raw_v4_table)
-            elif ip_address.version == 6:
-                raw_v6_table = self._run_cmd(
-                    "show ipv6 route {} {}".format(protocol, ip_address.ip))
-                v6_table = textfsm_extractor(
-                    self, "show_ipv6_route", raw_v6_table)
+
+            cmds = {
+                4: {
+                    'template': 'show_ip_route',
+                    'command': 'show ip route {} {}'.format(ip_address.ip, protocol)
+                },
+                6: {
+                    'template': 'show_ipv6_route',
+                    'command': 'show ipv6 route {} {}'.format(ip_address.ip, protocol)
+                }
+            }
+            cmd_dict = cmds[ip_address.version]
+            ret = self._run_cmd(cmd_dict['command'])
+
+            route_table = textfsm_extractor(self, cmd_dict['template'], ret)
         else:
-            raw_v4_table = self._run_cmd(
-                "show ip route {} {}".format(protocol, destination))
-            v4_table = textfsm_extractor(
-                self, "show_ip_route", raw_v4_table)
-            raw_v6_table = self._run_cmd(
-                "show ipv6 route {} {}".format(protocol, destination))
-            v6_table = textfsm_extractor(self, "show_ipv6_route", raw_v6_table)
-        route_table = v4_table + v6_table
+            cmds = [
+                {
+                    'template': 'show_ip_route',
+                    'command': 'show ip route {} {}'.format(destination, protocol)
+                },
+                {
+                    'template': 'show_ipv6_route',
+                    'command': 'show ipv6 route {} {}'.format(destination, protocol)
+                }
+            ]
+
+            ret = self.cli([cmd['command'] for cmd in cmds])
+
+            route_table = []
+            for cmd in cmds:
+                route_table.extend(textfsm_extractor(self, cmd['template'], ret[cmd['command']]))
 
         out = {}
         for route in route_table:
             if not out.get(route['destination']):
                 out[route['destination']] = []
-            new_path = {}
-            new_path['protocol'] = route['type']
-            new_path['preference'] = int(route['distance'])
-            new_path['next_hop'] = route['gateway']
+            new_path = {
+                'protocol': route['type'],
+                'preference': int(route['distance']),
+                'next_hop': route['gateway']
+            }
             out[route['destination']].append(new_path)
         return out
 
-    def _run_cmd(self, cmd):
-        url = self._api_url + 'cli'
-        data = {}
-        data['cmd'] = cmd
-        cmd_post = self._apisession.post(url, json=data)
-        if cmd_post.status_code == 200:
-            return base64.b64decode(
-                cmd_post.json()['result_base64_encoded']).decode('utf-8')
-        else:
-            raise CommandErrorException("Parsing CLI commands failed")
-
     def _config_batch(self, cmd_list):
         url = self._api_url + 'cli_batch'
-        data = {}
-        data['cli_batch_base64_encoded'] = ArubaOSS._str_to_b64(
-                                            '\n'.join(cmd_list))
-        batch_run = self._apisession.post(url, json=data)
-        if batch_run.status_code == 202:
-            check_status = self._apisession.get(url + "/status")
-            if check_status.status_code == 200:
-                for cmd_status in check_status.json()['cmd_exec_logs']:
-                    if cmd_status['status'] != "CCS_SUCCESS":
-                        log.debug("command failed to execute with error \
-                                 {}".format(cmd_status['result']))
-                        return False
-                    else:
-                        return True
-                return True
-        else:
+        data = {
+            'cli_batch_base64_encoded': ArubaOSS._str_to_b64('\n'.join(cmd_list))
+        }
+        batch_run = self._post(url, json=data)
+
+        if not batch_run.status_code == 202:
             log.debug("Failed to paste commands")
+
             return False
+
+        check_status = self._get(url + "/status")
+        if check_status.status_code == 200:
+            for cmd_status in check_status.json()['cmd_exec_logs']:
+                if cmd_status['status'] != "CCS_SUCCESS":
+                    log.debug("command failed to execute with error {}".format(cmd_status['result']))
+
+                    return False
+                else:
+                    return True
+            return True
 
     def _backup_config(self, config='running', destination='backup'):
         """Backup config."""
@@ -568,8 +697,8 @@ class ArubaOSS(NetworkDriver):
         else:
             "unsupported argument; raise error"
             return False
-        cmd_post = self._apisession.post(url, json=payload)
-        if not 300 > cmd_post.status_code >= 200:
+        cmd_post = self._post(url, json=payload)
+        if not cmd_post.ok:
             "raise error"
             pass
         else:
@@ -578,20 +707,128 @@ class ArubaOSS(NetworkDriver):
     def rollback(self):
         """Rollback configuration."""
         diff = self.compare_config()
-        if diff != '' and isinstance(diff, dict):
-            if not (len(diff.get('diff_add_list'))
-                    and len(diff.get('diff_remove_list'))):
+        if diff and isinstance(diff, dict):
+            if not (
+                    len(diff.get('diff_add_list')) and
+                    len(diff.get('diff_remove_list'))
+            ):
                 self._commit_candidate(config='backup_running')
+
                 return True
             else:
                 return False
 
+    def traceroute(
+            self,
+            destination,
+            source='',
+            ttl=255,
+            timeout=2,
+            vrf=''
+    ):
+        """
+        Execute traceroute on the device and returns a dictionary with the result.
+
+        :param destination: needed argument
+        :param source: not implemented as not available from device
+        :param ttl: not implemented as not available from device
+        :param timeout: not implemented as not available from device
+        :param vrf: not implemented as not available from device
+        :return: returns a dictionary containing the hops and probes
+        """
+        url = self._api_url + 'trace-route'
+        data = {"destination": {"ip_address": {"version": "IAV_IP_V4", "octets": destination}}}
+        data_post = self._post(url, json=data)
+
+        if not data_post.status_code == 200:
+            return {'error': 'unknown host {}'.format(destination)}
+
+        ret = {'success': {}}
+        ttl_data = data_post.json().get('ttl_data', [])
+
+        for hop_count in range(len(ttl_data)):
+            ret['success'][hop_count + 1] = {'probes': {}}
+            ttl_probe_data = ttl_data[hop_count].get('ttl_probe_data', [])
+            for probe_count in range(len(ttl_probe_data)):
+                try:
+                    hostname, _, _ = socket.gethostbyaddr(
+                        ttl_probe_data[probe_count].get('gateway', {}).get('ip_address', {}).get('octets', '')
+                    )
+                except socket.herror:  # fetch if nothing can be found
+                    hostname = ''
+
+                probe = {
+                    'rtt': float(ttl_probe_data[probe_count]['probe_time_in_millis']),
+                    'ip_address':
+                        ttl_probe_data[probe_count].get('gateway', {}).get('ip_address', {}).get('octets', ''),
+                    'hostname': hostname
+                }
+
+                ret['success'][hop_count + 1]['probes'][probe_count + 1] = probe
+                del probe
+
+        return ret
+
+    def ping(
+            self,
+            destination,
+            source='',
+            timeout=2,
+            ttl=255,
+            size=100,
+            count=5,
+            vrf=''
+    ):
+        """
+        Execute ping on the device and returns a dictionary with the result.
+
+        :param destination: needed argument
+        :param source: not implemented as not available from device
+        :param ttl: not implemented as not available from device
+        :param timeout: not implemented as not available from device
+        :param vrf: not implemented as not available from device
+        :param size: not implemented as not available from device
+        :param count: not implemented as not available from device
+        :return: returns a dictionary containing the hops and probes
+        """
+        data = {
+            'destination': {
+                'ip_address': {
+                    'version': 'IAV_IP_V4',
+                    "octets": destination
+                }
+            },
+            "timeout_in_seconds": timeout
+        }
+        data_post = self._post(self._ping_url, json=data)
+
+        if not data_post.status_code == 200:
+            return {'error': 'unknown host {}'.format(destination)}
+
+        if 'PR_OK' in data_post.json().get('result'):
+            result = {
+                'success': {
+                    'probes_sent': 1,
+                    'packet_loss': 0,
+                    'rtt_min': data_post.json().get('rtt_in_milliseconds'),
+                    'rtt_max': data_post.json().get('rtt_in_milliseconds'),
+                    'rtt_avg': data_post.json().get('rtt_in_milliseconds'),
+                    'rtt_stddev': 0,
+                    'results': {
+                        'ip_address': destination,
+                        'rtt': data_post.json().get('rtt_in_milliseconds')
+                    }
+                }
+            }
+
+            return result
+
     def close(self):
         """Close device connection and delete sessioncookie."""
-        rest_logout = self._apisession.delete(self._login_url)
-        self._headers['cookie'] = ''
+        rest_logout = self._delete(self._login_url)
+        self._apisession.headers['cookie'] = ''
 
-        if rest_logout.status_code != 204:
+        if not rest_logout.status_code == 204:
             log.debug("Logout Failed")
         else:
             return "logout ok"
