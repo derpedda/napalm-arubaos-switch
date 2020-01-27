@@ -1,5 +1,18 @@
-# Saltstack Examples
 
+# Saltstack Examples <!-- omit in toc -->
+
+- [grains.items](#grainsitems)
+- [net.arp](#netarp)
+- [net.mac](#netmac)
+- [net.ipaddrs](#netipaddrs)
+- [net.lldp](#netlldp)
+- [net.facts](#netfacts)
+- [route.show](#routeshow)
+- [net.cli](#netcli)
+- [net.config](#netconfig)
+- [net.load_config](#netloadconfig)
+- [ntp.servers](#ntpservers)
+- [napalm.compliance_report](#napalmcompliancereport)
 ## grains.items
 
 ```
