@@ -1,35 +1,71 @@
-! Command: show startup-config
-! Startup-config last modified at  Sun Sep 11 18:35:01 2016 by root
-! device: localhost (vEOS, EOS-4.15.2.1F)
-!
-! boot system flash:/vEOS-lab.swi
-!
-event-handler dhclient
-   trigger on-boot
-      action bash sudo /mnt/flash/initialize_ma1.sh
-      !
-      transceiver qsfp default-mode 4x10G
-      !
-      spanning-tree mode mstp
-      !
-      aaa authorization exec default local
-      !
-      aaa root secret 5 $1$zr7sHZaW$WagNykw1d5wjy4ZhtMgUS/
-      !
-      username admin privilege 15 role network-admin secret 5 $1$VoQBHXed$4z2.EoAeoIY2SFme/Pz3Q/
-      username vagrant privilege 15 role network-admin secret 5 $1$l/6gq.Qs$ifURvKWUYzLm0RqmRgr.W1
-      !
-      interface Ethernet1
-      !
-      interface Ethernet2
-      !
-      interface Management1
-         ip address 10.0.2.15/24
-	 !
-	 no ip routing
-	 !
-	 management api http-commands
-	    no shutdown
-	    !
-	    !
-	    end
+; JL319A Configuration Editor; Created on release #WC.16.10.0002
+; Ver #14:27.6f.f8.1d.9b.3f.bf.bb.ef.7c.59.fc.6b.fb.9f.fc.ff.ff.37.ef:04
+
+hostname "Access-2930M"
+module 1 type jl319a
+flexible-module A type JL083A
+rest-interface session-idle-timeout 120
+dhcp-snooping vlan 251-253 
+dhcpv6-snooping vlan 241-244 
+trunk A1-A2 trk11 lacp
+web-management ssl
+interface Trk11
+   dhcp-snooping trust
+   dhcpv6-snooping trust
+   exit
+snmp-server community "public" unrestricted
+oobm
+   ip address 10.5.10.51 255.255.255.0
+   ip default-gateway 10.5.10.1
+   ipv6 enable
+   ipv6 address dhcp full
+   exit
+vlan 1
+   ipv6 enable
+   ipv6 address dhcp full
+   exit
+vlan 241
+   name "VLAN241"
+   tagged Trk11
+   no ip address
+   exit
+vlan 242
+   name "VLAN242"
+   tagged Trk11
+   no ip address
+   exit
+vlan 243
+   name "VLAN243"
+   tagged Trk11
+   no ip address
+   exit
+vlan 244
+   name "VLAN244"
+   tagged Trk11
+   no ip address
+   exit
+vlan 251
+   name "VLAN251"
+   tagged Trk11
+   no ip address
+   exit
+vlan 252
+   name "VLAN252"
+   tagged Trk11
+   no ip address
+   exit
+vlan 253
+   name "VLAN253"
+   tagged Trk11
+   no ip address
+   exit
+spanning-tree Trk11 priority 4
+spanning-tree force-version rstp-operation
+no tftp server
+no autorun
+no dhcp config-file-update
+no dhcp image-file-update
+no dhcp tr69-acs-url
+password manager
+password operator
+
