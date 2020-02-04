@@ -3,8 +3,8 @@ from builtins import super
 
 import pytest
 
-import os
-import json
+import yaml
+import copy
 
 from napalm.base.test import conftest as parent_conftest
 
@@ -51,6 +51,12 @@ class PatchedArubaOSSDriver(ArubaOSS):
 
     def is_alive(self):
         return {"is_alive": True}  # always alive during the tests...
+
+    def open(self):
+        pass
+
+    def close(self):
+        pass
 
 
 
