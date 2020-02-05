@@ -122,9 +122,16 @@ class FakeArubaOSSDevice(BaseTestDouble):
         pass
 
     def cli(self, command=""):
-        filename = "{safe_command}.txt".format(safe_command=self.sanitize_text(command))
-        fielpath = self.find_file(filename)
-        return self.read_txt_file(fielpath)
+        """Fake CLI method."""
+        ret = dict()
+
+        for command in command_list:
+            filename = "{safe_command}.txt".format(safe_command=self.sanitize_text(command))
+            filepath = self.find_file(filename)
+        
+            ret[self.sanitize_text(command)] = self.read_txt_file(filepath)
+
+        return ret
 
     def run_commands(self, command_list, encoding='json'):
         """Fake run_commands."""
