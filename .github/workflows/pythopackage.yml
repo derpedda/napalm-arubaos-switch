@@ -33,6 +33,3 @@ jobs:
       run: |
         pip install pytest
         pytest
-    - name: Test all with tox
-      run: |
-        tox
