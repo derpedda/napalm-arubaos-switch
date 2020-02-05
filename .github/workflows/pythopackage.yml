@@ -1,4 +1,4 @@
-name: Python package
+name: Build Tests
 
 on: [push]
 
@@ -33,3 +33,6 @@ jobs:
       run: |
         pip install pytest
         pytest
+    - name: Run tox
+      run: |
+        tox

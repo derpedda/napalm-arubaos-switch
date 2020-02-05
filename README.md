@@ -1,6 +1,6 @@
 [![PyPI](https://img.shields.io/pypi/v/napalm-arubaos-switch.svg)](https://pypi.python.org/pypi/napalm-arubaos-switch)
 [![PyPI](https://img.shields.io/pypi/dm/napalm-arubaos-switch.svg)](https://pypi.python.org/pypi/napalm-arubaos-switch)
-[![Building Status](https://github.com/napalm-automation-community/napalm-arubaos-switch/workflows/Python%20package/badge.svg?branch=master)](https://github.com/napalm-automation-community/napalm-arubaos-switch/actions?query=workflow%3A"Python%20package")
+[![Building Status](https://github.com/napalm-automation-community/napalm-arubaos-switch/workflows/Build%20Tests/badge.svg?branch=master)](https://github.com/napalm-automation-community/napalm-arubaos-switch/actions?query=workflow%3A"Build%20Tests")
 # Napalm-arubaoss
 Driver implementation for Aruba OS Switch. Tested in AOS > WC.16.09.0004, some modules may not work properly in older versions.
 
@@ -128,26 +128,10 @@ More details in [Saltstack examples](docs/saltstack.md)
 
 How to get it running with ansible and some examples are in the [Ansible docs](docs/ansible.md)
 
-## Running the tests
-
-**TBD**: Explain how to run the automated tests for this system
-
-
 ## Contributing
 
 Please read [CONTRIBUTING](CONTRIBUTING.md) for details on our process for submitting pull requests to us, and please ensure
 you follow the [CODE_OF_CONDUCT](CODE_OF_CONDUCT.md).
-
-## Versioning
-
-**TBD**
-
-
-## Authors
-
-* **Guillermo Cotone** - [@gcotone](https://github.com/gcotone)
-
-See also the list of [contributors](CONTRIBUTORS.md) who participated in this project.
 
 ## License
 
